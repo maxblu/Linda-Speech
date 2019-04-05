@@ -10,6 +10,7 @@ import keras_preprocessing
 import keras_applications
 from pprint import pprint
 
+
 #done
 def compute_mfcc_logFilterBanks(audio_data, sample_rate):
     ''' Computes the mel-frequency cepstral coefficients.
@@ -25,7 +26,8 @@ def compute_mfcc_logFilterBanks(audio_data, sample_rate):
 
     # audio_data = audio_data - np.mean(audio_data)
     # audio_data = audio_data / np.max(audio_data)
-    lmfcc_feat = logfbank(audio_data,sample_rate,nfilt=80)   
+    lmfcc_feat = logfbank(audio_data,sample_rate,nfilt=80,nfft=1200)  
+    # print(lmfcc_feat.shape[0]) 
     return lmfcc_feat
 
 #done
@@ -91,32 +93,106 @@ def process_data(partition):
     transcripts = {}
     utt_len = {}  # Required for sorting the utterances based on length
 
+
     for filename in glob.iglob(partition+'/**/*.txt', recursive=True):
-        with open(filename, 'r') as file:
+        with open(filename, 'r',encoding='utf-8') as file:
             for line in file:
                 parts = line.split()
-                audio_file = parts[0]
+                try:
+                    audio_file = parts[0]
+                    
+                except Exception as identifier:
+                    continue
+                
                 file_path = os.path.join(os.path.dirname(filename),
-                                         audio_file+'.wav')
-                audio, sample_rate = sf.read(file_path)
-                feats[audio_file] = compute_mfcc_logFilterBanks(audio, sample_rate)
-                utt_len[audio_file] = feats[audio_file].shape[0]
+                                         audio_file+'.wav')                         
+                try:
+                    audio, sample_rate = sf.read(file_path)
+                except Exception as identifier:
+                    continue        
+                
+                
+                feats[file_path] = compute_mfcc_logFilterBanks(audio, sample_rate)
+                utt_len[file_path] = feats[file_path].shape[0]
                 target = ' '.join(parts[1:])
-                # transcripts[audio_file] = [CHAR_TO_IX[i] for i in target]
+                try:
+                    transcripts[file_path] = [CHAR_TO_IX[i] for i in target]
+                    
+                except Exception as identifier:
+                    # print("\n\n\n\n\n")
+                    print(identifier)
+                    # print("\n\n\n\n\n")
+
+
     return feats, transcripts, utt_len
 
+def create_records():
+    """ Pre-processes the raw audio and generates TFRecords.
+    This function computes the mfcc features, encodes string transcripts
+    into integers, and generates sequence examples for each utterance.
+    Multiple sequence records are then written into TFRecord files.
+    """
+    for partition in sorted(glob.glob(AUDIO_PATH+'/*')):
+        print('Processing' + partition)
+        feats, transcripts, utt_len = process_data(partition)
+        sorted_utts = sorted(utt_len, key=utt_len.get )
+        # bin into groups of 100 frames.
+        max_t = int(utt_len[sorted_utts[-1]]/100)
+        min_t = int(utt_len[sorted_utts[0]]/100)
 
+        # Create destination directory
+        write_dir = 'processed/' + partition.split('\\')[-1]
+        if tf.io.gfile.exists(write_dir):
+            tf.io.gfile.remove (write_dir)
+        tf.io.gfile.makedirs(write_dir)
+
+        if os.path.basename(partition) == 'train':
+            # Create multiple TFRecords based on utterance length for training
+            writer = {}
+            count = {}
+            print('Processing training files...')
+            for i in range(min_t, max_t+1):
+                filename = os.path.join(write_dir, 'train' + '_' + str(i) +
+                                        '.tfrecords')
+                writer[i] = tf.io.TFRecordWriter(filename)
+                count[i] = 0
+
+            for utt in tqdm(sorted_utts):
+                example = make_example(utt_len[utt], feats[utt].tolist(),
+                                       transcripts[utt])
+                index = int(utt_len[utt]/100)
+                writer[index].write(example)
+                count[index] += 1
+
+            for i in range(min_t, max_t+1):
+                writer[i].close()
+            # print(count)
+
+            # Remove bins which have fewer than 20 utterances
+            for i in range(min_t, max_t+1):
+                if count[i] < 20:
+                    os.remove(os.path.join(write_dir, 'train' +
+                                           '_' + str(i) + '.tfrecords'))
+        else:
+            # Create single TFRecord for dev and test partition
+            filename = os.path.join(write_dir, os.path.basename(write_dir) +
+                                    '.tfrecords')
+            print('Creating', filename)
+            record_writer =tf.io.TFRecordWriter(filename)
+            for utt in tqdm(sorted_utts):
+                example = make_example(utt_len[utt], feats[utt].tolist(),
+                                       transcripts[utt])
+                record_writer.write(example)
+            record_writer.close()
+            print('Processed '+str(len(sorted_utts))+' audio files')
+
+
+
+AUDIO_PATH = 'data/'
+ALPHABET = "ABCDEFGHIJKLMNÑOPQRSTUVWXYZabcdefghijklmnñopqrstuvwxyz1234567890áéíóúü "
+CHAR_TO_IX = {ch: i for (i, ch) in enumerate(ALPHABET)}
 
 
 if __name__ == "__main__":
-
-    audio, sample_rate = sf.read('s11.wav')
-
-    matrix_coef=compute_mfcc_logFilterBanks(audio,sample_rate)
-
-    print(np.shape(matrix_coef))
-     
-    for i in matrix_coef:
-        pprint(i)
-
-    # print(matrix_coef)
+    # audio, sample_rate = sf.read('data/test/speaker1/1.wav')
+    create_records()
